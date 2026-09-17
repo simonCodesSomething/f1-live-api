@@ -1,0 +1,4 @@
+fastapi
+uvicorn[standard]
+livef1
+pytest
