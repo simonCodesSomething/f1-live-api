@@ -264,6 +264,17 @@ class F1State:
                     timing.get("BestLapTime")
                 )
 
+                if any(
+                    sector.get("OverallFastest")
+                    for sector in timing.get("Sectors", [])
+                    if isinstance(sector, dict)
+                ):
+                    print(
+                        "OVERALL FASTEST SECTOR:",
+                        timing.get("RacingNumber"),
+                        timing.get("Sectors"),
+                    )
+                
                 sectors = timing.get("Sectors", [])
 
                 driver["sectors"] = [
@@ -283,6 +294,59 @@ class F1State:
                     for index, sector in enumerate(sectors)
                     if isinstance(sector, dict)
                 ]
+
+            # Calculate overall fastest sector times
+            fastest_sector_times = [None, None, None]
+
+            for current_driver in self.drivers.values():
+                for index, sector in enumerate(
+                    current_driver.get("sectors", [])
+                ):
+                    if index >= 3:
+                        continue
+
+                    value = sector.get("time")
+
+                    if not value:
+                        continue
+
+                    try:
+                        seconds = float(value)
+                    except (TypeError, ValueError):
+                        continue
+
+                    current_fastest = fastest_sector_times[index]
+
+                    if (
+                        current_fastest is None
+                        or seconds < current_fastest
+                    ):
+                        fastest_sector_times[index] = seconds
+
+            # Mark the driver(s) with the overall fastest sector
+            for current_driver in self.drivers.values():
+                for index, sector in enumerate(
+                    current_driver.get("sectors", [])
+                ):
+                    if index >= 3:
+                        continue
+
+                    value = sector.get("time")
+
+                    if not value:
+                        sector["overallFastest"] = False
+                        continue
+
+                    try:
+                        seconds = float(value)
+                    except (TypeError, ValueError):
+                        sector["overallFastest"] = False
+                        continue
+
+                    sector["overallFastest"] = (
+                        fastest_sector_times[index] is not None
+                        and seconds == fastest_sector_times[index]
+                    )
 
     def _process_timing_app_data(self, data: dict):
         lines = data.get("Lines", {})
@@ -306,40 +370,208 @@ class F1State:
     def _process_race_control(self, data: dict):
         messages = data.get("Messages", {})
 
+        if isinstance(messages, dict):
+            items = messages.items()
+
+        elif isinstance(messages, list):
+            items = enumerate(messages)
+
+        else:
+            return
+
         with self._lock:
-            if isinstance(messages, dict):
-                items = messages.items()
-
-            elif isinstance(messages, list):
-                items = enumerate(messages)
-
-            else:
-                return
-
             for message_id, message in items:
                 if not isinstance(message, dict):
                     continue
 
+                category = message.get("Category")
+                text = message.get("Message")
+                flag = message.get("Flag")
+                status = message.get("Status")
+                mode = message.get("Mode")
+
+                severity = self._race_control_severity(
+                    category=category,
+                    message=text,
+                    flag=flag,
+                    status=status,
+                    mode=mode,
+                )
+
                 item = {
                     "id": str(message_id),
-                    "category": message.get("Category"),
-                    "message": message.get("Message"),
-                    "flag": message.get("Flag"),
+                    "category": category,
+                    "message": text,
+                    "flag": flag,
                     "scope": message.get("Scope"),
                     "sector": message.get("Sector"),
                     "racingNumber": message.get(
                         "RacingNumber"
                     ),
-                    "status": message.get("Status"),
-                    "mode": message.get("Mode"),
-                    "lap": message.get("Lap"),
+                    "status": status,
+                    "mode": mode,
+                    "severity": severity,
+                    "lap": self._number(
+                        message.get("Lap")
+                    ),
                     "timestamp": message.get("Utc"),
                 }
 
-                self.race_control.append(item)
+                message_key = (
+                    item["message"],
+                    item["timestamp"],
+                    item["lap"],
+                    item["racingNumber"],
+                )
+
+                existing_index = next(
+                    (
+                        index
+                        for index, existing in enumerate(
+                            self.race_control
+                        )
+                        if (
+                            existing.get("id") == item["id"]
+                            or (
+                                existing.get("message"),
+                                existing.get("timestamp"),
+                                existing.get("lap"),
+                                existing.get("racingNumber"),
+                            )
+                            == message_key
+                        )
+                    ),
+                    None,
+                )
+
+                if existing_index is not None:
+                    self.race_control[
+                        existing_index
+                    ] = item
+                else:
+                    self.race_control.append(item)
 
             self.race_control = self.race_control[-100:]
 
+
+    @staticmethod
+    def _race_control_severity(
+        category=None,
+        message=None,
+        flag=None,
+        status=None,
+        mode=None,
+    ):
+        category_text = str(category or "").lower()
+        message_text = str(message or "").lower()
+        flag_text = str(flag or "").lower()
+        status_text = str(status or "").lower()
+        mode_text = str(mode or "").lower()
+
+        values = " ".join(
+            [
+                category_text,
+                message_text,
+                flag_text,
+                status_text,
+                mode_text,
+            ]
+        )
+        # Session Complete / Finished
+        if (
+            flag_text in {"chequered", "checkered"}
+            or "chequered flag" in message_text
+            or "checkered flag" in message_text
+        ):
+            return "info"
+
+        # Red flag / session stopped
+        if (
+            flag_text == "red"
+            or "red flag" in values
+            or "session stopped" in values
+            or "race stopped" in values
+        ):
+            return "red"
+
+        # Safety Car / Virtual Safety Car
+        if any(
+            keyword in values
+            for keyword in [
+                "safety car",
+                "safetycar",
+                "virtual safety car",
+                "vsc deployed",
+                "vsc ending",
+            ]
+        ):
+            return "safety-car"
+
+        # Yellow flags
+        if (
+            "yellow" in flag_text
+            or "yellow flag" in values
+            or "double yellow" in values
+        ):
+            return "yellow"
+
+        # Blue flags
+        if (
+            "blue" in flag_text
+            or "blue flag" in values
+        ):
+            return "blue"
+
+        # Black flags
+        if (
+            "black" in flag_text
+            or "black flag" in values
+        ):
+            return "red"
+
+        # Penalties / steward activity
+        if any(
+            keyword in values
+            for keyword in [
+                "penalty",
+                "penalised",
+                "penalized",
+                "investigation",
+                "summoned",
+                "decision",
+                "stewards",
+            ]
+        ):
+            return "penalty"
+
+        # Track limits / deleted lap times
+        if any(
+            keyword in values
+            for keyword in [
+                "track limits",
+                "time deleted",
+                "lap deleted",
+                "deleted -",
+            ]
+        ):
+            return "track-limits"
+
+        # DRS
+        if "drs" in values:
+            return "drs"
+
+        # Track clear
+        if any(
+            keyword in values
+            for keyword in [
+                "track clear",
+                "all clear",
+                "allclear",
+            ]
+        ):
+            return "clear"
+
+        return "info"
     def snapshot(self) -> dict:
         with self._lock:
             drivers = list(self.drivers.values())

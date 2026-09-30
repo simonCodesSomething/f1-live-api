@@ -24,6 +24,7 @@ class Session(BaseModel):
     gmtOffset: str | None = None
 
 class ScheduleSession(BaseModel):
+    sessionKey: int | None = None
     name: str
     type: str
     startDate: str
@@ -75,10 +76,11 @@ class RaceControlMessage(BaseModel):
     message: str | None = None
     flag: str | None = None
     scope: str | None = None
-    sector: int | None = None
+    sector: int | str | None
     racingNumber: str | int | None = None
     status: str | None = None
     mode: str | None = None
+    severity: str = "info"
     lap: int | None = None
     timestamp: str | None = None
 
